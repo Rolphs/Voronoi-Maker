@@ -72,11 +72,31 @@ Key options:
 poetry run python ui/main.py
 ```
 
-Current features:
-- Load STL via drag & drop or file dialog.  
-- Adjust Voronoi parameters with sliders.  
-- 3D preview (vedo/pyvista).  
-- Integrated log console.  
+The desktop window currently serves as a **UI skeleton**.  You can open it to
+explore the planned layout, but the data flow is intentionally minimal until
+the mesh loader and processing pipeline are wired in:
+
+- **File loading**: drag & drop and the *Load STL…* button both emit log
+  messages instead of importing geometry.  This logging-only behaviour will be
+  replaced once the upcoming loader integration lands.
+- **Preview panel**: the large 3D area is a placeholder frame explaining where
+  the vedo/pyvista preview will appear.  No rendering occurs yet.
+- **Controls**: parameter sliders and mode selector already update their
+  widgets, providing the scaffolding for future signal wiring.
+- **Log console**: captures the file-selection messages so you can verify the
+  drag & drop/file-dialog flow that the loader will eventually hook into.
+
+Follow-up work will update this section again once the loader/UI wiring is in
+place to document the quick-upload workflow and any live status or preview
+indicators.
+
+### Current limitations
+
+- Mesh loading is stubbed out—logs confirm selection, but nothing is parsed or
+  rendered.
+- The 3D preview frame is non-interactive until vedo/pyvista is connected.
+- The *Apply Voronoi* button is disabled while the processing backend is under
+  construction.
 
 ---
 
