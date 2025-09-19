@@ -9,6 +9,8 @@ from typing import Optional, Sequence
 
 import typer
 
+from .io import load_stl
+
 
 class Mode(str, Enum):
     """Supported processing modes for Voronoi generation."""
@@ -139,6 +141,7 @@ def _run_placeholder_pipeline(
     density: float,
     relief_depth: float,
     seeds: Sequence[SeedPoint],
+    mesh: "trimesh.Trimesh",
 ) -> None:
     """Placeholder pipeline execution.
 
@@ -148,6 +151,8 @@ def _run_placeholder_pipeline(
     typer.echo("Voronoi Maker (placeholder)")
     typer.echo(f"  Input:           {input_path}")
     typer.echo(f"  Output:          {output_path}")
+    typer.echo(f"  Mesh vertices:   {len(mesh.vertices)}")
+    typer.echo(f"  Mesh faces:      {len(mesh.faces)}")
     typer.echo(f"  Mode:            {mode.value}")
     typer.echo(f"  Surface skin:    {shell_thickness}")
     typer.echo(f"  Density:         {density}")
@@ -215,6 +220,11 @@ def run(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        mesh = load_stl(input)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="input") from exc
+
     _run_placeholder_pipeline(
         input_path=input,
         output_path=output_path,
@@ -223,5 +233,6 @@ def run(
         density=density,
         relief_depth=relief_depth,
         seeds=seeds,
+        mesh=mesh,
     )
     # TODO: Replace placeholder execution with the actual Voronoi pipeline.
