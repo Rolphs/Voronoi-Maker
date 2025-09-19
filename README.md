@@ -52,7 +52,9 @@ Main dependencies:
 ## Command line usage (CLI)
 
 ```bash
-poetry run voronoimaker run input.stl output.stl --mode radial --shell-thickness 1.2 --density 0.6 --relief-depth 0.6
+poetry run voronoimaker run input.stl output.stl \
+  --mode multicenter --shell-thickness 1.2 --density 0.6 --relief-depth 0.6 \
+  --seeds '[[0,0,0],[10,5,2]]'
 ```
 
 Key options:
@@ -60,7 +62,7 @@ Key options:
 - `--shell-thickness`: skin thickness in mm (e.g. `1.2`)
 - `--density`: relative density of Voronoi cells (0–1)
 - `--relief-depth`: carving/perforation depth in mm
-- `--seeds`: JSON list of centroids for multicenter mode
+- `--seeds`: JSON array of `[x, y, z]` centroid coordinates for multicenter mode (e.g. `'[[0,0,0],[10,5,2]]'`)
 
 ---
 

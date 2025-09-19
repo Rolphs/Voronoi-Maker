@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import typer
 
@@ -18,6 +19,51 @@ class Mode(str, Enum):
 
 
 app = typer.Typer(help="Generate Voronoi patterns for 3D models.")
+
+
+SeedPoint = tuple[float, float, float]
+
+
+def _parse_seeds(raw_seeds: Optional[str]) -> list[SeedPoint]:
+    """Parse the ``--seeds`` option into a list of centroid coordinates."""
+
+    if raw_seeds is None or raw_seeds.strip() == "":
+        return []
+
+    try:
+        decoded = json.loads(raw_seeds)
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive guard
+        raise typer.BadParameter("seeds must be valid JSON.", param_hint="seeds") from exc
+
+    if not isinstance(decoded, list):
+        raise typer.BadParameter(
+            "seeds must be a JSON array of coordinate triples.",
+            param_hint="seeds",
+        )
+
+    parsed: list[SeedPoint] = []
+    for index, entry in enumerate(decoded):
+        if not isinstance(entry, (list, tuple)):
+            raise typer.BadParameter(
+                f"seeds[{index}] must be a list of three numeric coordinates.",
+                param_hint="seeds",
+            )
+
+        if len(entry) != 3:
+            raise typer.BadParameter(
+                f"seeds[{index}] must contain exactly three coordinates.",
+                param_hint="seeds",
+            )
+
+        if not all(isinstance(coord, (int, float)) for coord in entry):
+            raise typer.BadParameter(
+                f"seeds[{index}] must contain only numbers.",
+                param_hint="seeds",
+            )
+
+        parsed.append(tuple(float(coord) for coord in entry))
+
+    return parsed
 
 
 def _default_output_path(input_path: Path) -> Path:
@@ -49,19 +95,12 @@ def _ensure_at_most(name: str, value: float, maximum: float, *, message: str | N
         raise typer.BadParameter(error_message, param_hint=name)
 
 
-def _ensure_positive_int(name: str, value: int) -> None:
-    """Ensure ``value`` is a positive integer."""
-
-    if value <= 0:
-        raise typer.BadParameter(f"{name} must be a positive integer.", param_hint=name)
-
-
 def _validate_parameters(
     mode: Mode,
     shell_thickness: float,
     density: float,
     relief_depth: float,
-    seeds: int,
+    seeds: Sequence[SeedPoint],
 ) -> None:
     """Perform lightweight validation for CLI parameters.
 
@@ -77,7 +116,11 @@ def _validate_parameters(
         message="density must be between 0 and 1 (inclusive).",
     )
     _ensure_non_negative("relief_depth", relief_depth)
-    _ensure_positive_int("seeds", seeds)
+    if mode is Mode.MULTICENTER and not seeds:
+        raise typer.BadParameter(
+            "seeds must provide at least one centroid when using multicenter mode.",
+            param_hint="seeds",
+        )
 
     if mode is Mode.SURFACE and relief_depth == 0:
         raise typer.BadParameter(
@@ -95,7 +138,7 @@ def _run_placeholder_pipeline(
     shell_thickness: float,
     density: float,
     relief_depth: float,
-    seeds: int,
+    seeds: Sequence[SeedPoint],
 ) -> None:
     """Placeholder pipeline execution.
 
@@ -109,9 +152,12 @@ def _run_placeholder_pipeline(
     typer.echo(f"  Surface skin:    {shell_thickness}")
     typer.echo(f"  Density:         {density}")
     typer.echo(f"  Relief depth:    {relief_depth}")
-    typer.echo(f"  Seeds:           {seeds}")
-    if mode is Mode.MULTICENTER:
-        typer.echo("  (using seeds as multicenter centroids)")
+    if seeds:
+        typer.echo(f"  Seeds:           {len(seeds)} centroid(s)")
+        for index, (x, y, z) in enumerate(seeds, start=1):
+            typer.echo(f"    {index:>2}: ({x:.6g}, {y:.6g}, {z:.6g})")
+    else:
+        typer.echo("  Seeds:           []")
     # TODO: Replace with real Voronoi generation logic when available.
 
 
@@ -153,15 +199,17 @@ def run(
         "--relief-depth",
         help="Depth of relief carving applied in surface mode.",
     ),
-    seeds: int = typer.Option(
-        500,
+    seeds_json: Optional[str] = typer.Option(
+        None,
         "--seeds",
-        help="Number of seed points to use for Voronoi generation (multicenter mode uses them as centroids).",
+        help="JSON array of centroid coordinates for multicenter mode (e.g. '[[0,0,0],[10,5,2]]').",
     ),
 ) -> None:
     """Generate Voronoi patterns for 3D models."""
 
     output_path = output or _default_output_path(input)
+
+    seeds = _parse_seeds(seeds_json)
 
     _validate_parameters(mode, shell_thickness, density, relief_depth, seeds)
 
