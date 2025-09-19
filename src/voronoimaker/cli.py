@@ -41,6 +41,14 @@ def _ensure_non_negative(name: str, value: float) -> None:
         raise typer.BadParameter(f"{name} must be zero or greater.", param_hint=name)
 
 
+def _ensure_at_most(name: str, value: float, maximum: float, *, message: str | None = None) -> None:
+    """Ensure ``value`` does not exceed ``maximum``."""
+
+    if value > maximum:
+        error_message = message or f"{name} must be {maximum} or less."
+        raise typer.BadParameter(error_message, param_hint=name)
+
+
 def _ensure_positive_int(name: str, value: int) -> None:
     """Ensure ``value`` is a positive integer."""
 
@@ -61,7 +69,13 @@ def _validate_parameters(
     """
 
     _ensure_positive("shell_thickness", shell_thickness)
-    _ensure_positive("density", density)
+    _ensure_non_negative("density", density)
+    _ensure_at_most(
+        "density",
+        density,
+        1.0,
+        message="density must be between 0 and 1 (inclusive).",
+    )
     _ensure_non_negative("relief_depth", relief_depth)
     _ensure_positive_int("seeds", seeds)
 
