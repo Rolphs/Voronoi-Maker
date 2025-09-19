@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QStackedLayout,
     QPushButton,
     QPlainTextEdit,
     QSlider,
@@ -36,6 +37,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+import trimesh
+
+from voronoimaker.io import load_stl
 
 
 @dataclass(frozen=True)
@@ -109,40 +114,125 @@ class FloatParameterControl(QWidget):
 
 
 class PreviewPlaceholder(QFrame):
-    """Minimal stub that reserves space for the interactive 3D preview."""
+    """Embed a vedo/VTK viewport to preview meshes inside the UI."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
         self.setObjectName("previewPlaceholder")
 
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignCenter)
+        self._stack = QStackedLayout(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
 
-        title = QLabel("3D Preview")
-        title.setObjectName("previewTitle")
-        description = QLabel(
-            "Interactive preview coming soon.\n"
-            "Connect vedo/pyvista to :py:meth:`PreviewPlaceholder.update_scene`."
-        )
-        description.setAlignment(Qt.AlignCenter)
+        self._message_label = QLabel("Initialising 3D preview…", self)
+        self._message_label.setAlignment(Qt.AlignCenter)
+        self._message_label.setWordWrap(True)
+        self._stack.addWidget(self._message_label)
 
-        layout.addWidget(title)
-        layout.addWidget(description)
+        self._preview_container = QWidget(self)
+        self._preview_layout = QVBoxLayout(self._preview_container)
+        self._preview_layout.setContentsMargins(0, 0, 0, 0)
+        self._preview_layout.setSpacing(0)
+        self._stack.addWidget(self._preview_container)
+
+        self._vtk_widget: QWidget | None = None
+        self._plotter: "Plotter" | None = None
+        self._disabled_reason: str | None = None
+
+        self._initialise_plotter()
+
+    # ------------------------------------------------------------------
+    def _initialise_plotter(self) -> None:
+        """Attempt to create the vedo plotter inside the Qt widget."""
+
+        try:
+            from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+            from vedo import Plotter
+        except Exception as exc:  # pragma: no cover - environment dependent
+            self._disabled_reason = str(exc)
+            self._show_message(
+                "3D preview unavailable on this system.\n"
+                "Ensure VTK/vedo and OpenGL drivers are installed.\n"
+                f"Details: {exc}"
+            )
+            return
+
+        try:
+            self._vtk_widget = QVTKRenderWindowInteractor(self)
+            self._preview_layout.addWidget(self._vtk_widget)
+            self._plotter = Plotter(
+                qt_widget=self._vtk_widget,
+                bg="white",
+                axes=1,
+                interactive=False,
+            )
+            self._vtk_widget.Initialize()
+            self._plotter.initialize_interactor()
+            # Render once so the widget initialises correctly even with no mesh.
+            self._plotter.render(resetcam=True)
+            self._stack.setCurrentWidget(self._preview_container)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            self._disabled_reason = str(exc)
+            self._plotter = None
+            self._vtk_widget = None
+            self._show_message(
+                "3D preview could not be initialised.\n"
+                f"Details: {exc}"
+            )
+
+    def _show_message(self, message: str) -> None:
+        self._message_label.setText(message)
+        self._stack.setCurrentWidget(self._message_label)
+
+    def _render(self, reset_camera: bool = False) -> None:
+        if self._plotter is None:
+            return
+        try:
+            self._plotter.render(resetcam=reset_camera)
+        except Exception:  # pragma: no cover - defensive guard for VTK
+            if self._plotter.interactor is not None:
+                try:
+                    self._plotter.interactor.Render()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     def update_scene(self, mesh_data: object | None) -> None:
-        """Placeholder hook to render mesh data in the future.
+        """Render ``mesh_data`` inside the embedded vedo viewport."""
 
-        Parameters
-        ----------
-        mesh_data:
-            Any object representing the geometry to visualise.  Future work can
-            accept `vedo.Plotter` actors, `pyvista.PolyData`, or a custom
-            domain object.  This method intentionally does nothing for now.
-        """
+        if self._plotter is None or self._vtk_widget is None:
+            reason = self._disabled_reason or "3D preview backend is unavailable."
+            self._show_message(reason)
+            raise RuntimeError(reason)
 
-        _ = mesh_data  # pragma: no cover - placeholder method
+        if mesh_data is None:
+            self._plotter.clear(deep=True)
+            self._render(reset_camera=True)
+            self._stack.setCurrentWidget(self._preview_container)
+            return
+
+        try:
+            from vedo.utils import trimesh2vedo
+        except Exception as exc:  # pragma: no cover - optional dependency path
+            message = f"3D preview conversion unavailable: {exc}"
+            self._show_message(message)
+            raise RuntimeError(message) from exc
+
+        try:
+            actor = trimesh2vedo(mesh_data)
+        except Exception as exc:
+            self._show_message(f"Failed to convert mesh for preview: {exc}")
+            raise
+
+        self._plotter.clear(deep=True)
+        try:
+            self._plotter.add(actor)
+        except Exception as exc:  # pragma: no cover - vedo rendering guard
+            self._show_message(f"Failed to display mesh: {exc}")
+            raise
+
+        self._stack.setCurrentWidget(self._preview_container)
+        self._render(reset_camera=True)
 
 
 class LogConsole(QPlainTextEdit):
@@ -203,6 +293,121 @@ class _QtLogHandler(logging.Handler):
         self._console.append_message(message)
 
 
+class MainController:
+    """Coordinate mesh loading, preview updates, and export actions."""
+
+    def __init__(
+        self,
+        preview: PreviewPlaceholder,
+        process_button: QPushButton,
+        export_button: QPushButton,
+        status_bar: QStatusBar,
+    ) -> None:
+        self._preview = preview
+        self._process_button = process_button
+        self._export_button = export_button
+        self._status_bar = status_bar
+        self._logger = logging.getLogger(__name__)
+
+        self._source_path: Path | None = None
+        self._source_mesh: trimesh.Trimesh | None = None
+        self._processed_mesh: trimesh.Trimesh | None = None
+
+    # ------------------------------------------------------------------
+    def load_mesh(self, path: Path) -> trimesh.Trimesh:
+        """Load an STL file from ``path`` and update the preview."""
+
+        mesh = load_stl(path)
+        self._source_path = Path(path)
+        self._source_mesh = mesh
+        self._processed_mesh = None
+
+        try:
+            self._preview.update_scene(mesh)
+        except RuntimeError as exc:  # pragma: no cover - preview optional
+            self._logger.warning("Preview unavailable: %s", exc)
+        except Exception as exc:
+            self._logger.exception("Failed to update preview for %s", path)
+            raise
+
+        self._process_button.setEnabled(True)
+        self._export_button.setEnabled(False)
+        self._status_bar.showMessage(f"Loaded {self._source_path.name}")
+        self._logger.info("Loaded STL file: %s", self._source_path)
+        return mesh
+
+    # ------------------------------------------------------------------
+    def apply_voronoi(self, parameters: Mapping[str, float], mode: str) -> None:
+        """Invoke the Voronoi pipeline and refresh the preview."""
+
+        if self._source_mesh is None or self._source_path is None:
+            raise RuntimeError("Load an STL file before applying Voronoi.")
+
+        self._status_bar.showMessage("Applying Voronoi…")
+        self._logger.info(
+            "Applying Voronoi: mode=%s parameters=%s", mode, dict(parameters)
+        )
+
+        processed_mesh = self._run_pipeline(self._source_mesh, parameters, mode)
+        self._processed_mesh = processed_mesh
+
+        try:
+            self._preview.update_scene(processed_mesh)
+        except RuntimeError as exc:  # pragma: no cover - preview optional
+            self._logger.warning("Preview unavailable: %s", exc)
+        except Exception:
+            self._logger.exception("Failed to update preview after processing.")
+            raise
+
+        self._export_button.setEnabled(True)
+        self._status_bar.showMessage("Voronoi preview updated.")
+
+    # ------------------------------------------------------------------
+    def export_processed_mesh(self, destination: Path) -> None:
+        """Write the processed mesh to ``destination`` as STL."""
+
+        if self._processed_mesh is None:
+            raise RuntimeError("Generate a Voronoi mesh before exporting.")
+
+        output_path = Path(destination)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._processed_mesh.export(output_path)
+        self._status_bar.showMessage(f"Exported {output_path.name}")
+        self._logger.info("Exported Voronoi STL to %s", output_path)
+
+    # ------------------------------------------------------------------
+    def default_export_path(self) -> Path:
+        """Return a sensible default path for STL exports."""
+
+        if self._source_path is None:
+            return Path.home() / "voronoi_output.stl"
+        return self._source_path.with_name(self._source_path.stem + "_voronoi.stl")
+
+    @property
+    def has_processed_mesh(self) -> bool:
+        return self._processed_mesh is not None
+
+    # ------------------------------------------------------------------
+    def _run_pipeline(
+        self,
+        mesh: trimesh.Trimesh,
+        parameters: Mapping[str, float],
+        mode: str,
+    ) -> trimesh.Trimesh:
+        """Placeholder hook for the real Voronoi generation pipeline."""
+
+        self._logger.info("Voronoi pipeline placeholder invoked (mode=%s)", mode)
+        processed = mesh.copy()
+        processed.metadata = processed.metadata or {}
+        processed.metadata.update(
+            {
+                "voronoi_mode": mode,
+                "voronoi_parameters": dict(parameters),
+            }
+        )
+        return processed
+
 class MainWindow(QMainWindow):
     """Primary application window with parameter controls and placeholders."""
 
@@ -215,9 +420,23 @@ class MainWindow(QMainWindow):
         self._parameter_controls: dict[str, FloatParameterControl] = {}
         self._preview = PreviewPlaceholder(self)
         self._log_console = LogConsole(self)
+        self._process_button: QPushButton | None = None
+        self._export_button: QPushButton | None = None
+        self._status_bar: QStatusBar | None = None
+        self._controller: MainController | None = None
 
         self._init_actions()
         self._init_ui()
+        if self._process_button is None or self._export_button is None:
+            raise RuntimeError("Controller buttons were not initialised correctly.")
+        if self._status_bar is None:
+            raise RuntimeError("Status bar was not initialised correctly.")
+        self._controller = MainController(
+            preview=self._preview,
+            process_button=self._process_button,
+            export_button=self._export_button,
+            status_bar=self._status_bar,
+        )
         self._init_logging()
 
     # ------------------------------------------------------------------
@@ -247,9 +466,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addWidget(main_splitter)
 
-        status_bar = QStatusBar(self)
-        status_bar.showMessage("Ready")
-        self.setStatusBar(status_bar)
+        self._status_bar = QStatusBar(self)
+        self._status_bar.showMessage("Ready")
+        self.setStatusBar(self._status_bar)
 
         self.addAction(self._open_action)
 
@@ -274,10 +493,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._create_parameter_group(panel))
         layout.addWidget(self._create_mode_group(panel))
 
-        process_button = QPushButton("Apply Voronoi", panel)
-        process_button.setEnabled(False)
-        process_button.setToolTip("Processing pipeline to be implemented.")
-        layout.addWidget(process_button)
+        self._process_button = QPushButton("Apply Voronoi", panel)
+        self._process_button.setEnabled(False)
+        self._process_button.setToolTip(
+            "Apply the configured Voronoi parameters to the loaded mesh."
+        )
+        self._process_button.clicked.connect(self._apply_voronoi)
+        layout.addWidget(self._process_button)
+
+        self._export_button = QPushButton("Export STL…", panel)
+        self._export_button.setEnabled(False)
+        self._export_button.setToolTip("Save the processed Voronoi mesh to disk.")
+        self._export_button.clicked.connect(self._export_stl)
+        layout.addWidget(self._export_button)
 
         layout.addStretch(1)
         return panel
@@ -289,6 +517,67 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
         return splitter
+
+    # ------------------------------------------------------------------
+    def _load_mesh_from_path(self, path: Path) -> None:
+        if self._controller is None:
+            return
+
+        logger = logging.getLogger(__name__)
+        try:
+            self._controller.load_mesh(path)
+        except FileNotFoundError as exc:
+            QMessageBox.critical(self, "File not found", str(exc))
+        except ValueError as exc:
+            QMessageBox.critical(self, "Failed to load STL", str(exc))
+        except Exception as exc:  # pragma: no cover - UI only
+            logger.exception("Unexpected error while loading %s", path)
+            QMessageBox.critical(self, "Failed to load STL", str(exc))
+        else:
+            logger.info("Loaded STL file: %s", path)
+
+    def _gather_parameters(self) -> dict[str, float]:
+        return {label: control.value() for label, control in self._parameter_controls.items()}
+
+    def _apply_voronoi(self) -> None:  # pragma: no cover - UI only
+        if self._controller is None:
+            return
+
+        parameters = self._gather_parameters()
+        mode = self._mode_selector.currentText()
+        logger = logging.getLogger(__name__)
+        try:
+            self._controller.apply_voronoi(parameters, mode)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "Voronoi Maker", str(exc))
+        except Exception as exc:
+            logger.exception("Voronoi processing failed")
+            QMessageBox.critical(self, "Voronoi processing failed", str(exc))
+
+    def _export_stl(self) -> None:  # pragma: no cover - UI only
+        if self._controller is None:
+            return
+
+        suggested = self._controller.default_export_path()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Voronoi STL",
+            str(suggested),
+            "STL files (*.stl);;All files (*)",
+        )
+        if not path:
+            return
+
+        logger = logging.getLogger(__name__)
+        try:
+            self._controller.export_processed_mesh(Path(path))
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+        except Exception as exc:
+            logger.exception("Failed to export STL to %s", path)
+            QMessageBox.critical(self, "Export failed", str(exc))
+        else:
+            QMessageBox.information(self, "Export complete", f"Voronoi mesh saved to {path}")
 
     # ------------------------------------------------------------------
     def _create_parameter_group(self, parent: QWidget) -> QGroupBox:
@@ -337,14 +626,19 @@ class MainWindow(QMainWindow):
             super().dragEnterEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:  # pragma: no cover - UI only
+        if self._controller is None:
+            return
+
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()]
         stl_files = [path for path in paths if path.suffix.lower() == ".stl"]
         if not stl_files:
             QMessageBox.warning(self, "Unsupported file", "Please drop STL files only.")
+            event.ignore()
             return
 
+        event.acceptProposedAction()
         for path in stl_files:
-            logging.getLogger(__name__).info("Queued STL via drag & drop: %s", path)
+            self._load_mesh_from_path(path)
 
     # ------------------------------------------------------------------
     def _open_file_dialog(self) -> None:
@@ -359,7 +653,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        logging.getLogger(__name__).info("Selected STL file: %s", path)
+        self._load_mesh_from_path(Path(path))
 
     # ------------------------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:  # pragma: no cover - UI only
