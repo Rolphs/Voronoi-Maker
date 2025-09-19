@@ -10,6 +10,7 @@ from typing import Optional, Sequence
 import typer
 
 from .io import load_stl
+from .pipeline import PipelineError, run_pipeline
 
 
 class Mode(str, Enum):
@@ -118,6 +119,12 @@ def _validate_parameters(
         message="density must be between 0 and 1 (inclusive).",
     )
     _ensure_non_negative("relief_depth", relief_depth)
+    if mode is not Mode.MULTICENTER and seeds:
+        raise typer.BadParameter(
+            "seeds can only be provided when using multicenter mode.",
+            param_hint="seeds",
+        )
+
     if mode is Mode.MULTICENTER and not seeds:
         raise typer.BadParameter(
             "seeds must provide at least one centroid when using multicenter mode.",
@@ -129,41 +136,8 @@ def _validate_parameters(
             "relief_depth must be greater than zero when using surface mode.",
             param_hint="relief_depth",
         )
-    # TODO: Add domain-specific validation rules for mode combinations once
-    #       the Voronoi-processing pipeline is available.
-
-
-def _run_placeholder_pipeline(
-    input_path: Path,
-    output_path: Path,
-    mode: Mode,
-    shell_thickness: float,
-    density: float,
-    relief_depth: float,
-    seeds: Sequence[SeedPoint],
-    mesh: "trimesh.Trimesh",
-) -> None:
-    """Placeholder pipeline execution.
-
-    The real Voronoi processing pipeline will replace this implementation.
-    """
-
-    typer.echo("Voronoi Maker (placeholder)")
-    typer.echo(f"  Input:           {input_path}")
-    typer.echo(f"  Output:          {output_path}")
-    typer.echo(f"  Mesh vertices:   {len(mesh.vertices)}")
-    typer.echo(f"  Mesh faces:      {len(mesh.faces)}")
-    typer.echo(f"  Mode:            {mode.value}")
-    typer.echo(f"  Surface skin:    {shell_thickness}")
-    typer.echo(f"  Density:         {density}")
-    typer.echo(f"  Relief depth:    {relief_depth}")
-    if seeds:
-        typer.echo(f"  Seeds:           {len(seeds)} centroid(s)")
-        for index, (x, y, z) in enumerate(seeds, start=1):
-            typer.echo(f"    {index:>2}: ({x:.6g}, {y:.6g}, {z:.6g})")
-    else:
-        typer.echo("  Seeds:           []")
-    # TODO: Replace with real Voronoi generation logic when available.
+    # Additional domain-specific validation rules can be added as the
+    # geometric processing implementation evolves.
 
 
 @app.command()
@@ -199,8 +173,8 @@ def run(
         "--density",
         help="Relative density of Voronoi cells (higher = more cells).",
     ),
-    relief_depth: float = typer.Option(
-        1.0,
+    relief_depth: Optional[float] = typer.Option(
+        None,
         "--relief-depth",
         help="Depth of relief carving applied in surface mode.",
     ),
@@ -216,7 +190,12 @@ def run(
 
     seeds = _parse_seeds(seeds_json)
 
-    _validate_parameters(mode, shell_thickness, density, relief_depth, seeds)
+    if relief_depth is None:
+        relief_depth_value = 1.0 if mode is Mode.SURFACE else 0.0
+    else:
+        relief_depth_value = relief_depth
+
+    _validate_parameters(mode, shell_thickness, density, relief_depth_value, seeds)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -225,14 +204,23 @@ def run(
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc), param_hint="input") from exc
 
-    _run_placeholder_pipeline(
-        input_path=input,
-        output_path=output_path,
-        mode=mode,
-        shell_thickness=shell_thickness,
-        density=density,
-        relief_depth=relief_depth,
-        seeds=seeds,
-        mesh=mesh,
-    )
-    # TODO: Replace placeholder execution with the actual Voronoi pipeline.
+    try:
+        processed_mesh = run_pipeline(
+            mode=mode.value,
+            mesh=mesh,
+            shell_thickness=shell_thickness,
+            density=density,
+            relief_depth=relief_depth_value,
+            seeds=seeds,
+        )
+    except PipelineError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    try:
+        processed_mesh.export(output_path)
+    except Exception as exc:  # pragma: no cover - filesystem or exporter failure
+        typer.echo(f"Failed to write mesh to '{output_path}': {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Voronoi mesh saved to {output_path}")
