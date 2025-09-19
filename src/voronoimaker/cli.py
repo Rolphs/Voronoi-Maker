@@ -12,9 +12,9 @@ import typer
 class Mode(str, Enum):
     """Supported processing modes for Voronoi generation."""
 
-    SHELL = "shell"
-    SOLID = "solid"
-    RELIEF = "relief"
+    SURFACE = "surface"
+    RADIAL = "radial"
+    MULTICENTER = "multicenter"
 
 
 app = typer.Typer(help="Generate Voronoi patterns for 3D models.")
@@ -65,9 +65,9 @@ def _validate_parameters(
     _ensure_non_negative("relief_depth", relief_depth)
     _ensure_positive_int("seeds", seeds)
 
-    if mode is Mode.RELIEF and relief_depth == 0:
+    if mode is Mode.SURFACE and relief_depth == 0:
         raise typer.BadParameter(
-            "relief_depth must be greater than zero when using relief mode.",
+            "relief_depth must be greater than zero when using surface mode.",
             param_hint="relief_depth",
         )
     # TODO: Add domain-specific validation rules for mode combinations once
@@ -89,13 +89,15 @@ def _run_placeholder_pipeline(
     """
 
     typer.echo("Voronoi Maker (placeholder)")
-    typer.echo(f"  Input:  {input_path}")
-    typer.echo(f"  Output: {output_path}")
-    typer.echo(f"  Mode:   {mode.value}")
-    typer.echo(f"  Shell thickness: {shell_thickness}")
+    typer.echo(f"  Input:           {input_path}")
+    typer.echo(f"  Output:          {output_path}")
+    typer.echo(f"  Mode:            {mode.value}")
+    typer.echo(f"  Surface skin:    {shell_thickness}")
     typer.echo(f"  Density:         {density}")
     typer.echo(f"  Relief depth:    {relief_depth}")
     typer.echo(f"  Seeds:           {seeds}")
+    if mode is Mode.MULTICENTER:
+        typer.echo("  (using seeds as multicenter centroids)")
     # TODO: Replace with real Voronoi generation logic when available.
 
 
@@ -116,16 +118,16 @@ def run(
         help="Destination for the generated Voronoi mesh.",
     ),
     mode: Mode = typer.Option(
-        Mode.SHELL,
+        Mode.SURFACE,
         "--mode",
         "-m",
         case_sensitive=False,
-        help="Processing mode to use for Voronoi generation.",
+        help="Processing mode to use for Voronoi generation (surface, radial, or multicenter).",
     ),
     shell_thickness: float = typer.Option(
         2.0,
         "--shell-thickness",
-        help="Thickness of the shell when using shell mode.",
+        help="Thickness of the Voronoi skin when using surface mode.",
     ),
     density: float = typer.Option(
         0.5,
@@ -135,12 +137,12 @@ def run(
     relief_depth: float = typer.Option(
         1.0,
         "--relief-depth",
-        help="Depth of relief carving when using relief mode.",
+        help="Depth of relief carving applied in surface mode.",
     ),
     seeds: int = typer.Option(
         500,
         "--seeds",
-        help="Number of seed points to use for Voronoi generation.",
+        help="Number of seed points to use for Voronoi generation (multicenter mode uses them as centroids).",
     ),
 ) -> None:
     """Generate Voronoi patterns for 3D models."""
